@@ -20,11 +20,11 @@ url_comp['admin']='false'
 schema=url_comp['schema']
 
 sys.stderr=open('a','w')
-url=schema+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
 r = requests.get(url)
 if r.status_code != requests.codes.ok:
-    schema='https'
-    url=schema+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+    url_comp[schema]='https'
+    url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
     r = requests.get(url)
     if r.status_code != requests.codes.ok:
         sys.stderr.write("Cannot communicate with VoltDB\nExiting....")
@@ -37,7 +37,7 @@ if deployment_param['status']!=1:
 expexcted_host_num=int(deployment_param['results'][0]['data'][1][1])
 # print "Hello"
 # print expexcted_host_num
-url=schema+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[\"OVERVIEW\"]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[\"OVERVIEW\"]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
 r = requests.get(url)
 
 overview_param=json.loads(r.content)

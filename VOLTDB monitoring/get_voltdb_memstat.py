@@ -36,7 +36,7 @@ def mem_stat_module(url_comp,issues,comp):
 
     phymem=0
     rss=0
-    count =0
+    
     for title in stat_param['results'][0]['schema']:
         if title['name']:
             titles.append(title['name'])

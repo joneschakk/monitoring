@@ -1,5 +1,5 @@
 def repl_check(current_hosts,overview_param):
-    not_replicated=[]
+    no_repl_found=[]
     titles=[]
     for element in overview_param['results'][0]['data']:
         if element[0] in current_hosts.keys() and element[1] == 'REPLICATIONROLE':
@@ -28,7 +28,14 @@ def repl_check(current_hosts,overview_param):
             for title in dr_param['results'][0]['schema']:
                 if title['name']:
                     titles.append(title['name'])
-            titles.index()
+            hostid_idx=titles.index('HOSTID')
+            mode_idx=titles.index('MODE')
+            for element in dr_param['results'][0]['data']:
+                if element[hostid_idx] in no_repl_found and element[mode_idx] == 'NORMAL':
+                    is_replicating.append(element[hostid_idx])
+            if not is_replicating:
+                "REPLICATION NOT STARTED ERROR"
+            
 
 
             
