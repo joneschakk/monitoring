@@ -37,6 +37,10 @@ def repl_check(current_hosts,overview_param):
                 "REPLICATION NOT STARTED ERROR"
             
 
+            "Check @allrows and rows"
+            "first iterates over every node and compares with all other nodes in clster"
+            
+
 
             
             
