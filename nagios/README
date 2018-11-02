@@ -1,0 +1,52 @@
+voltdb-nagios
+=============
+
+Copyright (c) 2014 VoltDB Inc. All rights reserved. 
+
+Nagios plugins for monitoring VoltDB:
+
+    check_voltdb_cluster
+    check_voltdb_memory
+    check_voltdb_ports
+    check_voltdb_replication
+    
+
+Other tools:
+
+    get_voltdb_statistics   Handy tool for getting statistics from VoltDB into csv/tsv.
+
+
+Required perl modules (also see the module header for more information):
+
+    JSON-2.53
+    JSON::Path-0.201
+    LWP::UserAgent
+    Getopt::Std-1.07
+    DateTime
+
+
+This is what we suggest:
+
+Monitor each of your VoltDB instances with the check_voltdb_ports. This will give you an alert if any instance dies.
+(This is a redundant check if you are using any other checks.)
+
+Optionally, monitor each instance memory usage with check_voltdb_memory. This checks the memory used by VoltDB on 
+the host that the check is done against only. If you are also using the ports check, tell nagios that check memory
+is dependent on check port. Select a warning and/or critical threshold(s) and pass those as arguments to the plugin.
+
+Optionally, for k-safe clusters, monitor each VoltDB node with check_voltdb_cluster. This is a cluster wide check that 
+can run on any node(s). This will give you an alert if any node(s) are down in the cluster (i.e. cluster is not optimal).
+
+Optionally, if you are using replication, monitor the status of replication with check_voltdb_replication. This is a node
+check made on master and replica nodes that will give you an alert if replication falls behind or fails. Replica nodes
+are normally not checked, but this can be overridden by a command line option. By default, the plugin will report  a warning
+when replication is forced to spill to disk and critical when replication has failed (or is not running), but you can 
+override this behavior and select warning and critical limits expressed in bytes backlogged. The plugin will also give an
+alert if the replication agent has not been heard from for more than an interval of your choosing (default is 120 sec).
+
+
+We tested under Ubuntu 10.04 with Perl 5.14.2
+
+We welcome your feedback, contact support@voltdb.com.
+
+Happy monitoring!

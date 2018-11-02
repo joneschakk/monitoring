@@ -1,0 +1,141 @@
+#!/usr/bin/perl
+#################################################################################
+# (c) 2014 VoltDB Inc. All rights reserved.
+#################################################################################
+#
+# Note: JSON must be enabled in the voltdb deployment.xml to use this plugin.
+#
+# A handy? tool for getting statistics from VoltDB into tab separated format
+# with an optional header row. Useful for collecting or monitoring stats.
+#
+
+use strict;
+#use Data::Dumper;
+use JSON;
+use JSON::Path;
+use LWP::UserAgent;
+use Getopt::Std;
+use DateTime;
+
+my $HOST;
+my $HOSTPORT="8080";
+my %opts=();
+my $sep="\t";
+my $COMP="TABLE";
+my $DELTA=0;
+my $admin="false";
+
+sub usage() {
+    print "\nusage:\n";
+    print "get_voltdb_statistics -H host [-p port] -C component -D delta\n";
+    print "\t-h : print the column headers as the first line\n";
+    print "\t-H hostname : The hostname of the box where voltdb is running (default:localhost)\n";
+    print "\t-p port : httpd port for voltdb (defaultr:8080)\n";
+    print "\t-C component (DR, INDEX, INITIATOR, IOSTATS, LIVECLIENTS, MANAGEMENT, MEMORY, PARTITIONCOUNT, PROCEDURE, PROCEDUREPROFILE, TABLE)\n";
+    print "\t-D delta (0=for stats since instance start, 1=stats since last call)\n";
+    print "\t-s separator (default \t)\n";
+    print "\t-f read JSON format stats from file\n";
+    print "\t-z interpert first column as datetime in epoch and make human readable\n";
+    print "\t-U userid\n";
+    print "\t-P password\n";
+    exit 3;
+}
+
+getopts ("AC:D:f:hH:M:P:p:s:U:z", \%opts) || usage;
+
+if (defined $opts{H} && defined $opts{f}) {
+    print "-H and -f are mutually exclusive\n";
+    usage;
+}
+
+if (defined $opts{U} xor defined $opts{P}) {
+    print "need both userid and password\n";
+    usage;
+}
+
+$HOST=$opts{H} if defined $opts{H};
+$HOSTPORT=$opts{p} if defined $opts{p};
+
+if (defined $opts{C}) { $COMP=$opts{C} };
+if (defined $opts{D}) { $DELTA=$opts{D} };
+if (defined $opts{s}) { $sep=$opts{s} };
+if (defined $opts{M}) {
+    $admin = $opts{M};
+    if ($admin ne "true" && $admin ne "false") {
+        print "invalid value for -M option must be 'true' or 'false'";
+        usage;
+    }
+}
+print "$admin\n";
+
+my $ua;
+my $req;
+my $res;
+my $stats;
+my $cred = "";
+if (defined $opts{U}) {
+    $cred = "&User=$opts{U}&Password=$opts{P}";
+}
+
+if (defined $opts{H}) {
+    $ua = LWP::UserAgent->new;
+    $ua->agent("MyApp/0.1 ");
+    $ua->timeout(30);
+    $ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+    $ua->ssl_opts( verify_hostname => 0 ,SSL_verify_mode => 0x00);
+    my $req = HTTP::Request->new(GET => "http://$HOST:$HOSTPORT/api/1.0/?Procedure=\@Statistics&Parameters=[$COMP,$DELTA]&admin=".$admin.$cred);
+    my $res = $ua->request($req);
+    
+    #check https port if http failed
+    if (!$res->is_success) {
+        $HOSTPORT="8443" if !defined $opts{p};
+        $req = HTTP::Request->new(GET => "https://$HOST:$HOSTPORT/api/1.0/?Procedure=\@Statistics&Parameters=[$COMP,$DELTA]&admin=".$admin.$cred);
+        $res = $ua->request($req);
+        if (!$res->is_success) {
+                print "Failed to connect to VoltDB\n";
+                exit 3;
+        } 
+    } 
+    $stats = decode_json($res->content);
+
+} elsif (defined $opts{f}) {
+    open FILE, "<", $opts{f} or die $!;
+    $stats = <FILE>;
+    close FILE;
+
+} else {
+    print "No data source specified -H or -f\n";
+    usage;
+}
+
+my $jpath;
+$jpath = JSON::Path->new('$.statusstring');
+my ($status) = $jpath->values($stats);
+if ($status) {
+    print $status."\n";
+    exit 3;
+}
+
+my $t = 0;
+while (1) {
+    $jpath = JSON::Path->new('$.results['.$t.'].schema.*.name');
+    my @columns = $jpath->values($stats);
+    last if scalar @columns == 0;
+    if (defined $opts{h}) {
+        if (defined $opts{z}) {
+            unshift(@columns, "TS");
+        }
+        print join($sep, @columns)."\n";
+    }
+
+    $jpath = JSON::Path->new('$.results['.$t.'].data.*');
+    my @rows = $jpath->values($stats);
+    foreach (@rows) {
+        if (defined $opts{z}) {
+            unshift(@$_, DateTime->from_epoch(epoch=>@$_[0]/1000));
+        }
+        print join($sep, @$_)."\n";
+    }
+    $t++;
+}
+exit 0;

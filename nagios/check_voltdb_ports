@@ -1,0 +1,88 @@
+#!/bin/bash
+#################################################################################
+# Nagios plug-in for VoltDB
+# (c) 2013-2014 VoltDB Inc. All rights reserved.
+#################################################################################
+#
+# This plugin checks the standard tcp ports of VoltDB by wrapping check_tcp.
+#
+# Nagios integration:
+#
+# define command{
+#     command_name    check-voltdb-ports
+#     command_line    $USER1$/check_voltdb_ports -H $HOSTADDRESS$
+# }
+#
+# define service{
+#         use                             generic-service
+#         hostgroup_name                  voltdb-servers
+#         service_description             voltdb alive
+#         check_command                   check-voltdb-ports
+# }
+#
+# VoltDB opens many ports here is a list of them.
+# Consult VoltDB documentation for more infomation on ports and usages.
+#
+
+VOLTDB_ADMIN=21211
+VOLTDB_HTTPD=8080
+#VOLTDB_CLSTR=3021   #DO NOT RUN TCP_CHECK TO THE INTERNAL PORTS ERRORS WILL RESULT
+VOLTDB_CLIENT=21212
+
+HOME='/usr/lib/nagios/plugins' #path to the plugins
+PROTO='tcp' # all voltdb ports are tcp
+DATEFORMAT=+%Y-%m-%d\ %H:%M:%S
+DATEON=0
+
+# a function for printing the help info
+printusage ()
+{
+    echo -e "\nusage:"
+    echo -e "\tcheck_voltdb_ports -H host"
+    echo -e "\t-h : print this message"
+    echo -e "\t-H hostname: The hostname of the box where voltdb is running (default localhost)"
+    echo -e "\t-z display timestamp on output messages (log style)"
+    exit 3
+}
+
+printdate ()
+{
+    [ $DATEON -ne 0 ] && echo -n "`date \"$DATEFORMAT\"` "
+}
+
+# specifiy ports to check
+PORT="$VOLTDB_ADMIN $VOLTDB_HTTPD $VOLTDB_CLSTR $VOLTDB_CLIENT $VOLTDB_JMX"
+
+while getopts "hH:z" opt
+do
+        case $opt in
+                h )      echo "This plugin checks all VoltDB ports by calling check_tcp once for each port"
+                         printusage;;
+                H )      HOST=${OPTARG};;
+                z )      DATEON=1;;
+                ? )      printusage;;
+        esac
+done
+
+if [ -z "$HOST" ]; then
+    echo "`printdate`ERROR - host not specified"
+    printusage
+fi
+
+if [ ! -e "${HOME}/check_${PROTO}" ]; then
+    echo "ERROR required nagios plugin \"${HOME}/check_${PROTO}\" not found"
+    exit 3
+fi
+
+for i in `echo ${PORT}`
+do
+   ${HOME}/check_${PROTO} -H ${HOST} -p ${i}>/dev/null
+   if [ "$?" -ne 0 ]
+   then
+      echo "`printdate`VoltDB CRITICAL - port ${PROTO}/$i is not available"
+      exit 2
+   fi
+done
+
+echo "`printdate`VoltDB all ports are responding normally"
+exit 0

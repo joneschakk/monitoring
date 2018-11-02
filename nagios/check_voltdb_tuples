@@ -1,0 +1,162 @@
+#!/usr/bin/perl
+#######################################################################
+# Nagios plug-in for VoltDB
+# (c) 2014 VoltDB Inc. All rights reserved.
+#######################################################################
+#
+# Note: JSON must be enabled in the VoltDB deployment.xml to use this plugin.
+#
+# This plugin checks the health of a VoltDB cluster by reporting an error
+# if the number of nodes operating is less than the configured node count.
+#
+# Nagios integration:
+#
+# define command{
+#     command_name    check-voltdb-tuples
+#     command_line    $USER1$/check_voltdb_tuples -H $HOSTADDRESS$ $ARG1$ $ARG2$ $ARG3$ ...
+# }
+#
+# define service{
+#         use                             generic-service
+#         hostgroup_name                  voltdb-servers
+#         service_description             voltdb tuples
+#         check_command                   check-voltdb-tuples
+# }
+#
+
+use strict;
+#use Data::Dumper;
+use JSON;
+use JSON::Path;
+use LWP::UserAgent;
+use Getopt::Std;
+
+my $HOST;
+my $HOSTPORT="8080";
+my %opts=();
+my $COMP="TABLE";
+my $DELTA=0;
+my $admin="false";
+
+sub usage() {
+    print "\nusage:\n";
+    print "check_voltdb_tuples -H host [-p port] [--] TABLENAME WARN CRIT ...\n";
+    print "\t\tTABLENAME name of the voltdb table\n";
+    print "\t\tWARN warning level (as percentage of partition limit, 1-100)\n";
+    print "\t\tCRIT critical level (as percentage of partition limit, 1-100)\n";
+    print "\t\trepeat triplet for each table to be monitored\n";
+    print "\n";
+    print "\t-H hostname : The hostname of the server where voltdb is running\n";
+    print "\t-p port : httpd port for voltdb (default:8080)\n";
+    print "\t-U userid\n";
+    print "\t-P password\n";
+    exit 3;
+}
+
+getopts ("hH:P:p:U:", \%opts) || usage;
+
+if (defined $opts{h}) {
+    usage;
+}
+
+if (!defined $opts{H}) {
+    print "No host data source specified -H.\n";
+    usage;
+}
+$HOST=$opts{H};
+$HOSTPORT=$opts{p} if defined $opts{p};
+
+if (defined $opts{U} xor defined $opts{P}) {
+    print "Need both userid and password.\n";
+    usage;
+}
+my $cred = "";
+if (defined $opts{U}) {
+    $cred = "&User=$opts{U}&Password=$opts{P}";
+}
+
+my $nargs = @ARGV;
+if ($nargs == 0 || $nargs % 3) {
+    print "Insufficient parameters passed.\n";
+    usage;
+}
+
+foreach (my $i=0; $i<$nargs; $i++) {
+    if (($i % 3) && ($ARGV[$i] !~ /^\d+$/)) {
+        print "Parameter ",$i+1," is not numeric.\n";
+        usage;
+    }
+}
+
+my $ua;
+my $req;
+my $res;
+my $stats;
+$ua = LWP::UserAgent->new;
+$ua->agent("MyApp/0.1 ");
+$ua->timeout(30);
+$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+$ua->ssl_opts( verify_hostname => 0 ,SSL_verify_mode => 0x00);
+my $req = HTTP::Request->new(GET => "http://$HOST:$HOSTPORT/api/1.0/?Procedure=\@Statistics&Parameters=[$COMP,$DELTA]&admin=".$admin.$cred);
+my $res = $ua->request($req);
+
+#check https port if http failed
+if (!$res->is_success) {
+        $HOSTPORT="8443" if !defined $opts{p};
+        $req = HTTP::Request->new(GET => "https://$HOST:$HOSTPORT/api/1.0/?Procedure=\@Statistics&Parameters=[$COMP,$DELTA]&admin=".$admin.$cred);
+        $res = $ua->request($req);
+        if (!$res->is_success) {
+                print "Failed to connect to VoltDB\n";
+        	exit 3;
+	}
+}
+$stats = decode_json($res->content);
+
+my $jpath;
+$jpath = JSON::Path->new('$.statusstring');
+my ($status) = $jpath->values($stats);
+if ($status) {
+    print "Unexpected status response to statistics call: ".$status."\n";
+    exit 3;
+}
+
+$jpath = JSON::Path->new('$.results[0].schema[*].name');
+my @rows = $jpath->values($stats);
+my ($TABLE_NAME) = grep { $rows[$_] eq 'TABLE_NAME' } 0..$#rows or die "column TABLE_NAME not found";
+my ($TUPLE_LIMIT) = grep { $rows[$_] eq 'TUPLE_LIMIT' } 0..$#rows or die "column TUPLE_LIMIT not found";
+my ($TUPLE_COUNT) = grep { $rows[$_] eq 'TUPLE_COUNT' } 0..$#rows or die "column TUPLE_COUNT not found";
+
+$jpath = JSON::Path->new('$.results[0].data.*');
+my @rows = $jpath->values($stats);
+foreach (@ARGV) {
+    my $T = uc shift;
+    my $WARN_LIMIT = shift;
+    my $CRIT_LIMIT = shift;
+    my $matchCount = 0;
+    foreach (@rows) {
+        if (uc @$_[$TABLE_NAME] eq $T) {
+            $matchCount++;
+            # check limits if the table is not empty
+            if (@$_[$TUPLE_COUNT] > 0) {
+                if (@$_[$TUPLE_LIMIT] !~ /^\d+$/) {
+                    print "Error...Table '$T' does not have a TUPLE_LIMIT configured.\n";
+                    exit 3;
+                }
+                my $tc = @$_[$TUPLE_COUNT] / @$_[$TUPLE_LIMIT] * 100;
+                if ($tc >= $CRIT_LIMIT) {
+                    print "CRITICAL alarm for tuple count on table '$T', now at $tc % of max, actual count is @$_[$TUPLE_COUNT]\n";
+                    exit 2;
+                } elsif ($tc >= $WARN_LIMIT) {
+                    print "WARNING alarm for tuple count on table '$T', now at $tc % of max, actual count is @$_[$TUPLE_COUNT]\n";
+                    exit 1;
+                }
+            }
+        }
+    }
+    # warn if argument didn't match anything
+    if ($matchCount == 0) {
+        print "Error... table '$T' not found.\n";
+        exit 3;
+    }
+}
+exit 0;

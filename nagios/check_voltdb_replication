@@ -1,0 +1,310 @@
+#!/usr/bin/perl
+#################################################################################
+# Nagios plug-in for VoltDB
+# (c) 2013-2014 VoltDB Inc. All rights reserved.
+#################################################################################
+#
+# Note: JSON must be enabled in the VoltDB deployment.xml to use this plugin.
+#
+# This plugin checks the status of replication of a VoltDB cluster. Use it on each
+# node of the Master and Replica clusters. When the node is in the Master role,
+# replication will be checked. When the node is in the Replica role, unless -R is
+# specified replication will NOT be checked. So in the most typical configuration,
+# monitoring should be setup for all nodes, and checking will be done based on the
+# actual operating role at when the check is performed.
+#
+# The user can specify warning and critical levels for notification of replication
+# backlog based on bytes buffered. Refer to the VoltDB documentation to determine
+# the limits of buffering replication backlog, but, at the time of this writing,
+# each partition buffers 128M in memory and thereafter spills to local disk. If no
+# limits are specified for -w or -c the plugin will raise a critical alarm if any
+# partition is spilling to disk. Replication limits are expressed in PER PARTITION
+# values. Monitoring output reports per node (aggregate) values.
+#
+# In addition to raising alarms on replication backlog, using -t (default 120sec)
+# you can alarm if the cluster has not received an ACK from the replication agent
+# in the specified interval. If replication goes awry, depending on the situation,
+# things may happen very quickly. You may want to test monitoring system response
+# time to typical failure scenarios and tune to ensure you get notified in a timely
+# manner.
+#
+# This plugin is intentionally aggressive at raising alarms, if you find it to be
+# too aggressive, modify the defaults. Consider submitting your and/or comments to
+# the forum or to support.
+#
+#################################################################################
+#
+# Nagios integration:
+#
+# define command{
+#     command_name    check-voltdb-replication
+#     command_line    $USER1$/check_voltdb_replication -H $HOSTADDRESS$ -w $ARG1$ -c $ARG2$ -t $ARG3$
+# }
+#
+# define service{
+#         use                             generic-service
+#         hostgroup_name                  voltdb-servers
+#         service_description             voltdb replication
+#         check_command                   check-voltdb-replication!67108864!134217728!120
+# }
+#
+
+use strict;
+use JSON;
+use JSON::Path;
+use LWP::UserAgent;
+use Getopt::Std;
+use POSIX qw(strftime);
+
+my $HOST="localhost";
+my $HOSTPORT="8080";
+# note that at 16MB backlog PER PARTITION, data will spill to disk
+my $critLimit = 16*1024*1024; # evaluated PER PARTITION
+my $warnLimit = 4*1024*1024; # evaluated PER PARTITION
+my $critTimeLimit = 120; # min in sec time since last DR agent ACK to alarm
+my $critTimeBufferLimit = 200*1024; # min buffer size for last ACK alarm. After idle time, before first new ack arrives, won't alarm if buffer is small
+
+my $admin = "false";
+
+sub usage() {
+    print "\nusage:\n";
+    print "check_voltdb_replication -H host [-p port] [-w bytes] [-c bytes] [-t secs]\n";
+    print "\t-h           print this message\n";
+    print "\t-H hostname  The hostname or ipaddress of voltdb instance (default:localhost)\n";
+    print "\t-p port      httpd port for voltdb (default:8080)\n";
+    print "\t-w bytes     warn when replication backlog has grown to size bytes (default:4MB/partition)\n";
+    print "\t-c bytes     critical when replication backlog has grown to size bytes (default:16MB/partition)\n";
+    print "\t-t secs      critical elapsed time since last ack heard from replication agent (default:120)\n";
+    print "\t-R           monitor replication status of node even if it is a REPLICA node (unusual)\n";
+    print "\t-z           display timestamp on output messages (log style)\n";
+    print "\t-U           userid\n";
+    print "\t-P           password\n";
+    exit 3;
+}
+
+my %opts=();
+getopts ("c:hH:P:p:Rt:U:w:z", \%opts) || usage;
+
+if (defined $opts{h}) {
+    print "This plugin checks the status of replication of a VoltDB master cluster node\n";
+    usage;
+}
+
+if (defined $opts{U} xor defined $opts{P}) {
+    print "need both userid and password\n";
+    usage;
+}
+
+$HOST=$opts{H} if defined $opts{H};
+$HOSTPORT=$opts{p} if defined $opts{p};
+
+$warnLimit = $opts{w} if defined $opts{w};
+$critLimit = $opts{c} if defined $opts{c};
+$critTimeLimit = $opts{t} if defined $opts{t};
+
+print strftime("%Y-%m-%d %H:%M:%S ", localtime(time())) if defined $opts{z};
+
+my $cred = "";
+if (defined $opts{U}) {
+    $cred = "&User=$opts{U}&Password=$opts{P}";
+}
+
+my $ua = LWP::UserAgent->new;
+$ua->agent("MyApp/0.1 ");
+$ua->timeout(30);
+$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+$ua->ssl_opts( verify_hostname => 0 ,SSL_verify_mode => 0x00);
+my $req = HTTP::Request->new(GET => "http://$HOST:$HOSTPORT/api/1.0/?Procedure=\@SystemInformation&Parameters=['OVERVIEW']&admin=".$admin.$cred);
+my $res = $ua->request($req);
+my $PROT="http";
+
+#check https port if http failed
+if (!$res->is_success) {
+        $HOSTPORT="8443" if !defined $opts{p};
+        $req = HTTP::Request->new(GET => "https://$HOST:$HOSTPORT/api/1.0/?Procedure=\@SystemInformation&Parameters=['OVERVIEW']&admin=".$admin.$cred);
+        $res = $ua->request($req);
+        $PROT="https";
+        if (!$res->is_success) {
+                print "ERROR Failed to connect to VoltDB\n";
+                exit 3;
+        }
+}
+
+my $sysinfo = decode_json($res->content);
+my $jpath = JSON::Path->new('$.status');
+my ($status) = $jpath->values($sysinfo);
+if ($status != 1) {
+    $jpath = JSON::Path->new('$.statusstring');
+    my ($statusstring) = $jpath->values($sysinfo);
+    print "ERROR Error status indicated in VoltDB sysinfo msg:'$statusstring'.\n";
+    exit 3;
+}
+
+# Detemine if this node is a master node or a replica node.
+# locate the hostid using ipaddress or hostname
+# Attempt to match on hostname or ipaddress
+$JSON::Path::Safe=0;
+$jpath = JSON::Path->new("\$.results[0].data[?(@\$_[1] =~ /HOSTNAME/)].*");
+my $myHostId = ($jpath->values($sysinfo))[0];
+if (!defined $myHostId) {
+    print "ERROR Failed to get hostid\n";
+    exit 3;
+}
+
+$jpath = JSON::Path->new("\$.results[0].data[?(@\$_[0] == $myHostId && @\$_[1] =~ /REPLICATIONROLE/)].*");
+my $replicationRole = ($jpath->values($sysinfo))[2];
+if (!$replicationRole) {
+    print "ERROR Failed to get replication role\n";
+    exit 3;
+}
+
+# If this node is a replica, bypass replication checking and report OK status unless option -R is specified
+# Option -R is to enable checking the replication status of a Replica node, and is used when daisy chaining
+# replications (unusual).
+if ($replicationRole eq "REPLICA" && ! defined $opts{R}) {
+    print "VoltDB Replication inactive (normal) - node is in replica role.\n";
+    exit 0;
+}
+
+my $req = HTTP::Request->new(GET => "$PROT://$HOST:$HOSTPORT/api/1.0/?Procedure=\@Statistics&Parameters=['DR',0]&admin=".$admin.$cred);
+my $res = $ua->request($req);
+if (!$res->is_success) {
+    print "ERROR Failed to connect to VoltDB\n";
+    exit 3;
+}
+my $drstats = decode_json($res->content);
+
+my $jpath = JSON::Path->new('$.status');
+my ($status) = $jpath->values($drstats);
+if ($status != 1) {
+    $jpath = JSON::Path->new('$.statusstring');
+    my ($statusstring) = $jpath->values($drstats);
+    print "ERROR Error status indicated in VoltDB dr stats msg:'$statusstring'.\n";
+    exit 3;
+}
+
+$jpath = JSON::Path->new('$.results[0].schema.*.name');
+my @columns = $jpath->values($drstats);
+my $ncols = scalar(@columns);
+
+# make a perl array of hashes from the JSON schema
+my $jpath = JSON::Path->new('$.results[0].data.*');
+my @x = $jpath->values($drstats);
+my @allrows = ();
+foreach (@x) {
+    my $i=0;
+    my %row = ();
+    foreach (@$_) {
+        $row{$columns[$i]}=$_;
+        $i++;
+    }
+    push(@allrows, \%row);
+}
+
+# filter for rows for the monitored host (-H)
+my @rows = grep { $_->{HOST_ID} eq $myHostId } @allrows;
+my $nparts = scalar(@rows);
+if (!$nparts) {
+    print "ERROR No data passed filtering, suspect hostname matching failed\n";
+    exit 3;
+}
+
+# Do a cluster wide check and see if any nodes are replicating,
+# If none are, replication was probably never started.
+my $isReplicating = grep { $_->{MODE} eq 'NORMAL' } @allrows;
+if ( !$isReplicating ) {
+    print "VoltDB Replication CRITICAL - replication has not started.\n";
+    exit 2;
+}
+
+# See if any partitions on this host are replicating.
+# In a k-safe cluster this may be zero.
+my $partReplicatingCount = grep { $_->{MODE} eq 'NORMAL' } @rows;
+
+# Were going to be really agressive here and do a sanity check to
+# verify that every partition that this node has a copy of is actively
+# replicating somewhere on the cluster, and if we find any that are not,
+# raise a critical alarm. This should not happen.
+my @ptns = map { $_->{PARTITION_ID} } @rows;
+my %reps = ();
+foreach (grep {$_->{MODE} eq "NORMAL"} @allrows) {
+    $reps{$_->{PARTITION_ID}} = $_->{HOSTNAME};
+};
+#delete($reps{3}); #handy for testing following logic
+my @notrep = (grep { ! $reps{$_} } @ptns);
+if (scalar(@notrep)) {
+    print "VoltDB Replication CRITICAL - Detected partition(s) not replicating: @notrep\n";
+    exit 2;
+}
+
+# At this point, all partitions should show ISSYNCED. If any don't that
+# most likely means that replication has failed and that data
+# has been lost from the replication buffers, so raise an alarm
+# if that is the case.
+my $isNotSynced = grep { $_->{ISSYNCED} eq 'false' } @rows;
+if ($isNotSynced) {
+    print "VoltDB Replication CRITICAL - replication failure\n";
+    exit 2;
+}
+
+# Now check out the storage limits -w and -c partition by partition.
+# If any are over limit, raise the appropriate warning or critical alarm.
+my $warnPartCount=0; my $critPartCount=0;
+my $totalBytes=0, my $totalBytesInMemory=0;
+my $isSpilling=0, my $strSpilling="";
+my $currdt = time(); # get current dt/time in UTC epoch in secs
+my $tdiff=0;
+my $maxtdiff=0;
+
+# on a partition by partition basis see how long its been since we last heard from the consumer.
+# If its been longer than the limit set by -t or default and there is sometime to replicate, raise an appropriate alarm
+
+foreach (@rows) {
+    $tdiff = $currdt - $_->{LASTACKTIMESTAMP}/1000000;
+    if ($tdiff < -3) {
+        print "Possible clock skew detected between monitor and host, cannot compute time offset $tdiff\n";
+        exit 3;
+    }
+    if (($tdiff > $critTimeLimit && $_->{TOTALBYTES} > $critTimeBufferLimit) || ($_->{TOTALBYTES} > $critLimit)) {
+        $critPartCount++;
+        if ($tdiff > $maxtdiff){
+            $maxtdiff = $tdiff;
+        }
+    }
+    if ($_->{TOTALBYTES} > $warnLimit) {
+        $warnPartCount++;
+    }
+    $totalBytes += $_->{TOTALBYTES};
+    $totalBytesInMemory += $_->{TOTALBYTESINMEMORY};
+    if ($_->{TOTALBYTES} - $_->{TOTALBYTESINMEMORY}) {
+        $isSpilling++;
+    }
+}
+
+# see if any node is spilling backlog to disk, get count of nodes spilling
+if ($isSpilling) {
+    $strSpilling = ", ".$isSpilling." node(s) Spilling to disk";
+}
+
+# If the reported backlog numbers look wierd to you, remember that the limits are evaluted per partition,
+# yet the results are rendered for all partitions on the host. Its done this way because there may be
+# skew among the partitions, and, so that the calulations are indpendent of the configuration.
+
+if ($critPartCount) {
+    printf ("VoltDB Replication CRITICAL - over backlog limit by %d%%, $totalBytes bytes queued${strSpilling} and Replication agent not heard from for $maxtdiff secs.\n",
+                    ($totalBytes)/($critLimit*$nparts)*100);
+    exit 2; #critical alarm
+}
+if ($warnPartCount) {
+    printf ("VoltDB Replication WARNING - over backlog limit by %d%%, $totalBytes bytes queued${strSpilling}.\n",
+                    ($totalBytes)/($warnLimit*$nparts)*100);
+    exit 1; #warning alarm
+}
+
+# Always warn if any node is spilling.
+if ($isSpilling) {
+    print "VoltDB Replication WARNING - Backlog spilling to disk, $totalBytes bytes queued.\n";
+    exit 1; # this is a warning alarm
+}
+print "VoltDB Replication OK - bytes queued: ${totalBytes}${strSpilling}.\n";
+exit 0;

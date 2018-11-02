@@ -1,0 +1,135 @@
+#!/usr/bin/perl
+#######################################################################
+# Nagios plug-in for VoltDB
+# (c) 2013-2014 VoltDB Inc. All rights reserved.
+#######################################################################
+#
+# Note: JSON must be enabled in the VoltDB deployment.xml to use this plugin.
+#
+# This plugin checks the health of a VoltDB cluster by reporting an error
+# if the number of nodes operating is less than the configured node count.
+#
+# Nagios integration:
+#
+# define command{
+#     command_name    check-voltdb-cluster
+#     command_line    $USER1$/check_voltdb_cluster -H $HOSTADDRESS$
+# }
+#
+# define service{
+#         use                             generic-service
+#         hostgroup_name                  voltdb-servers
+#         service_description             voltdb cluster
+#         check_command                   check-voltdb-cluster
+# }
+#
+
+use strict;
+use JSON;
+use JSON::Path;
+use LWP::UserAgent;
+use Getopt::Std;
+use POSIX qw/strftime/;
+
+my $HOST;
+my $HOSTPORT="8080";
+my $admin="false";
+
+sub usage() {
+    print "\nusage:\n";
+    print "check_voltdb_cluster -H host [-p port]\n";
+    print "\t-h : print this message\n";
+    print "\t-H hostname : The hostname of voltdb instance (default:localhost)\n";
+    print "\t-p port : httpd port for voltdb (default:8080)\n";
+    print "\t-z : display timestamp on output messages (log style)\n";
+    print "\t-U : userid\n";
+    print "\t-P : password\n";
+    exit 3
+}
+
+my %opts=();
+getopts ("hH:P:p:U:z", \%opts) || usage;
+
+if (defined $opts{h}) {
+    print "This plugin checks the health of a VoltDB cluster\n";
+    usage;
+}
+
+if (!defined $opts{H}) {
+    print "Host not specified";
+    usage;
+}
+
+if (defined $opts{U} xor defined $opts{P}) {
+    print "need both userid and password\n";
+    usage;
+}
+
+$HOST=$opts{H};
+$HOSTPORT=$opts{p} if defined $opts{p};
+
+print strftime('%Y-%m-%d %H:%M:%S ',localtime) if defined $opts{z};
+
+my $cred = "";
+if (defined $opts{U}) {
+    $cred = "&User=$opts{U}&Password=$opts{P}";
+}
+
+my $ua = LWP::UserAgent->new;
+$ua->agent("MyApp/0.1 ");
+$ua->timeout(30);
+$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+$ua->ssl_opts( verify_hostname => 0 ,SSL_verify_mode => 0x00);
+my $req = HTTP::Request->new(GET => "http://$HOST:$HOSTPORT/api/1.0/?Procedure=\@SystemInformation&Parameters=['DEPLOYMENT']&admin=".$admin.$cred);
+my $res = $ua->request($req);
+my $PROT="http";
+
+#check https port if http failed
+if (!$res->is_success) {
+        $HOSTPORT="8443" if !defined $opts{p};
+        $req = HTTP::Request->new(GET => "https://$HOST:$HOSTPORT/api/1.0/?Procedure=\@SystemInformation&Parameters=['DEPLOYMENT']&admin=".$admin.$cred);
+	$res = $ua->request($req); 
+	$PROT="https";
+	if (!$res->is_success) {   
+		print "Failed to connect to VoltDB\n";
+    		exit 3;
+	}
+}
+
+my $sysinfo_deployment = decode_json($res->content);
+
+my $jpath = JSON::Path->new('$.status');
+my ($status) = $jpath->values($sysinfo_deployment);
+if ($status != 1) {
+    $jpath = JSON::Path->new('$.statusstring');
+    my ($statusstring) = $jpath->values($sysinfo_deployment);
+    print "Error status indicated in VoltDB deployment info msg:'$statusstring'.\n";
+    exit 3;
+}
+
+$JSON::Path::Safe=0;
+$jpath = JSON::Path->new('$.results[0].data[?(@$_[0] =~ /hostcount/)].*');
+my $expectedHostCount =  ${[$jpath->values($sysinfo_deployment)]}[1];
+
+$req = HTTP::Request->new(GET => "$PROT://$HOST:$HOSTPORT/api/1.0/?Procedure=\@SystemInformation&Parameters=['OVERVIEW']&admin=".$admin.$cred);
+$res = $ua->request($req);
+my $sysinfo_overview = decode_json($res->content);
+
+$jpath = JSON::Path->new('$.status');
+($status) = $jpath->values($sysinfo_overview);
+if ($status != 1) {
+    $jpath = JSON::Path->new('$.statusstring');
+    my ($statusstring) = $jpath->values($sysinfo_overview);
+    print "Error status indicated in VoltDB overview info msg:'$statusstring'.\n";
+    exit 3;
+}
+
+$jpath = JSON::Path->new('$.results[0].data.*[0]');
+my %seen=();
+my $actualHostCount = grep {!$seen{$_}++} @{[$jpath->values($sysinfo_overview)]};
+if ($expectedHostCount != $actualHostCount) {
+    print "VoltDB Cluster CRITICAL - ".($expectedHostCount-$actualHostCount)." node(s) down\n";
+    exit 2;
+}
+print "VoltDB Cluster is Optimal\n";
+exit 0;
