@@ -1,45 +1,144 @@
-def repl_check(current_hosts,overview_param):
+from collections import defaultdict
+from time import time
+import sys
+
+
+def replication_check(url_comp,issues,current_hosts,overview_param):
     no_repl_found=[]
     titles=[]
     for element in overview_param['results'][0]['data']:
-        if element[0] in current_hosts.keys() and element[1] == 'REPLICATIONROLE':
+        if element[0] in current_hosts.keys() and element[1] == 'REPLICATIONROLE':   #check in overview param if node is in replication mode
             if element[2] !='REPLICA':
                 no_repl_found.append(element[0])
         else:
             issue=True
-            "Message - No replica in json issues"
-    if not_replicated:
-        url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@Statistics&Parameters=[DR,0]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+            issues['ERROR']="Replication Module:Failed to get replication role"
+            sys.exit(1)
+    if no_repl_found:
+        url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+\
+        "/api/1.0/?Procedure=@Statistics&Parameters=[DR,0]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
         r = requests.get(url)
         if r.status_code != requests.codes.ok:
             url_comp[schema]='https'
-            url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@Statistics&Parameters=[DR,0]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+            url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+\
+            "/api/1.0/?Procedure=@Statistics&Parameters=[DR,0]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
             r = requests.get(url)
             if r.status_code != requests.codes.ok:
+                issue=True
+                issues['ERROR']="Replication Module:Cannot communicate with VoltDB"
                 sys.stderr.write("Cannot communicate with VoltDB\nExiting....")
-                sys.exit(1)
-            dr_param=json.loads(r.content)
-            if dr_param['status']!=1:
-                print "ERROR Error status indicated in VoltDB dr stats msg: ",dr_param['statustring'],'\n'
-                sys.exit(0)
-            
-            
-            
-            for title in dr_param['results'][0]['schema']:
-                if title['name']:
-                    titles.append(title['name'])
-            hostid_idx=titles.index('HOSTID')
-            mode_idx=titles.index('MODE')
-            for element in dr_param['results'][0]['data']:
-                if element[hostid_idx] in no_repl_found and element[mode_idx] == 'NORMAL':
-                    is_replicating.append(element[hostid_idx])
-            if not is_replicating:
-                "REPLICATION NOT STARTED ERROR"
-            
+                sys.exit(1)  #ERROR
+        dr_param=json.loads(r.content)
+        if dr_param['status']!=1:
+            print "ERROR Error status indicated in VoltDB dr stats msg: ",dr_param['statustring'],'\n'
+            sys.exit(1) # ERROR
+        
+        
+        
+        for title in dr_param['results'][0]['schema']:
+            if title['name']:
+                titles.append(title['name'])   #title of table 
+        hostid_idx=titles.index('HOSTID')
+        mode_idx=titles.index('MODE')
+        row_of_nodes=defaultdict(list)
+        
+        for element in dr_param['results'][0]['data']:
+            element_to_dict={}
+            for i in range(0,len(titles)):
+                element_to_dict[titles[i]]=element[i]
+                rows_of_nodes[element[hostid_idx]].append(element_to_dict)
+            if element[hostid_idx] in no_repl_found and element[mode_idx] == 'NORMAL':
+                is_replicating.append(element[hostid_idx])
+        if not is_replicating:
+            issue=True
+            issues['ERROR']="Replication Module:Replication not started"
+            sys.exit(1)
+            #"REPLICATION NOT STARTED ERROR"
+        #REPLICATION OF PARTIOTION BEING CHECKED FOR NODES
+        for x in row_of_nodes:
+            for param_x in x:
+                list_a.append(param_x['PARTITIONID'])
+                if not param_x['ISSYNCED']:
+                    issue=True
+                    issues['ERROR']="Replication Module:VoltDB Replication CRITICAL - replication failure"
+                    sys.exit(1)
+                    #NOT SYNCED PROPERLY "VoltDB Replication CRITICAL - replication failure\n" 
+            list_b=list_a
+            for y in row_of_nodes:
+                if y != x:
+                    for param_y in y:
+                        if param_y['PARTITIONID'] in list_a:
+                            list_b.remove(param_y['PARTITIONID'])
+            list_unreplicated_partition.append(list_b)
+        if list_unreplicated_partition:
+            issue=True
+            issues['ERROR']="Replication Module:CRITICAL - Detected partition(s) not replicating"
+                    
+            sys.exit(1)   #Partitions not correctly replicated  "VoltDB Replication CRITICAL - Detected partition(s) not replicating
+        
+        
+        critPartCount=0
+        totalBytes=0 
+        totalBytesInMemory=0
+        isSpilling=0
+        strSpilling=""
+        currdt = time() # get current dt/time in UTC epoch in secs
+        tdiff=0
+        maxtdiff=0
 
-            "Check @allrows and rows"
-            "first iterates over every node and compares with all other nodes in clster"
+
+        for x in row_of_nodes:
+            nparts=0
+            for param_x in x:
+                tdiff = currdt - param_x['LASTACKTIMESTAMP']/1000000
+                if (tdiff < -3):
+                    issue=True
+                    issues['ERROR']="Replication Module:Possible clock skew detected between monitor and host, cannot compute time offset"
+                    sys.exit(1)
+                if ((tdiff > critTimeLimit and  param_x['TOTALBYTES'] > critTimeBufferLimit) or (param_x['TOTALBYTES'] > critLimit)):
+                    critPartCount+=1
+                    if (tdiff > maxtdiff):
+                        maxtdiff = tdiff
+                totalBytes +=  param_x['TOTALBYTES']
+                totalBytesInMemory +=  param_x['TOTALBYTESINMEMORY']
+                if ( param_x['TOTALBYTES'] -  param_x['TOTALBYTESINMEMORY']):
+                    isSpilling+=1
+                nparts+=1
+            if (isSpilling):
+                strSpilling = ", "+isSpilling+" node(s) Spilling to disk"
+            if (critPartCount):
+                issue=True
+                issues['ERROR']="Replication Module:CRITICAL - over backlog limit by "+((totalBytes)/(critLimit*nparts)*100)+'%'+\
+                totalBytes+" bytes queued"+strSpilling+" and Replication agent not heard from for "+maxtdiff+"secs.\n"
+                #critical alarm
+
+
+            # Always warn if any node is spilling.
+            if (isSpilling): 
+                sys.stderr.write("VoltDB Replication WARNING - Backlog spilling to disk, "+totalBytes+" bytes queued.\n")
+                # this is a warning alarm
             
+            sys.stderr.write("VoltDB Replication OK - bytes queued: "+totalBytes+strSpilling+"\n")
+    
+    return issues
+    
+    
+
+
+    
+
+
+                        
+                
+
+
+
+            
+        
+
+        #"Check @allrows and rows"
+       # "first iterates over every node and compares with all other nodes in clster"
+        
 
 
             

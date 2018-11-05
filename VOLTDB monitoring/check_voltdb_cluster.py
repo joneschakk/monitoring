@@ -6,6 +6,7 @@ import sys
 import pprint
 
 from get_voltdb_stat import mem_stat_module
+from voltdb_repl import replication_check
 
 issue =False
 issues={}
@@ -20,15 +21,18 @@ url_comp['admin']='false'
 schema=url_comp['schema']
 
 sys.stderr=open('a','w')
-url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
-r = requests.get(url)
-if r.status_code != requests.codes.ok:
-    url_comp[schema]='https'
-    url=url_comp[schema]+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin=false&User="+url_comp['userid']+"&Password="+url_comp['password']
+url=url_comp['schema']+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
+try :
     r = requests.get(url)
     if r.status_code != requests.codes.ok:
-        sys.stderr.write("Cannot communicate with VoltDB\nExiting....")
-        sys.exit(1)
+        url_comp['schema']='https'
+        url=url_comp['schema']+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@SystemInformation&Parameters=[DEPLOYMENT]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
+        r = requests.get(url)
+        if r.status_code != requests.codes.ok:
+            raise Exception
+except:
+    sys.stderr.write("Cannot communicate with VoltDB\nExiting....")
+    sys.exit(1)
 
 deployment_param=json.loads(r.content)
 if deployment_param['status']!=1:
@@ -58,8 +62,8 @@ if hosts_down:
 
 
 comp='memory'
-mem_stat_module(url_comp,issues,comp)
-
+issues=mem_stat_module(url_comp,issues)
+issues=replication_check(url_comp,issues,current_hosts,overview_param)
 with open('issue.json','w') as fp:
     json.dump(issues,fp)
 

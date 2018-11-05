@@ -17,13 +17,15 @@ titles=[]
 mem_critical_p=90
 
 
-def mem_stat_module(url_comp,issues,comp):
+def mem_stat_module(url_comp,issues):
     schema=url_comp['schema']
-    url=schema+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@Statistics&Parameters=["+comp+","+delta+"]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
+    url=schema+"//"+url_comp['host']+":"+url_comp['port']+\
+    "/api/1.0/?Procedure=@Statistics&Parameters=[MEMORY,"+delta+"]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
     r = requests.get(url)
     if r.status_code != requests.codes.ok:
         schema='https'
-        url=schema+"//"+url_comp['host']+":"+url_comp['port']+"/api/1.0/?Procedure=@Statistics&Parameters=["+comp+","+delta+"]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
+        url=schema+"//"+url_comp['host']+":"+url_comp['port']+\
+        "/api/1.0/?Procedure=@Statistics&Parameters=[MEMORY,"+delta+"]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
         r = requests.get(url)
         if r.status_code != requests.codes.ok:
             print "Cannot communicate with VoltDB\nExiting...."
