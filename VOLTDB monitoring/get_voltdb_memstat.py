@@ -19,8 +19,10 @@ mem_critical_p=90
 
 def mem_stat_module(url_comp,issues):
     schema=url_comp['schema']
+    
     url=schema+"//"+url_comp['host']+":"+url_comp['port']+\
     "/api/1.0/?Procedure=@Statistics&Parameters=[MEMORY,"+delta+"]&admin="+url_comp['admin']+"&User="+url_comp['userid']+"&Password="+url_comp['password']
+    # print url
     r = requests.get(url)
     if r.status_code != requests.codes.ok:
         schema='https'
@@ -31,6 +33,7 @@ def mem_stat_module(url_comp,issues):
             print "Cannot communicate with VoltDB\nExiting...."
             sys.exit(1)
     stat_param=json.loads(r.content)
+    # print stat_param['status']
     if stat_param['statusstring']:
         print stat_param['statusstring']
         sys.exit(1)
@@ -55,8 +58,9 @@ def mem_stat_module(url_comp,issues):
     else:
         sys.stderr.write("RSS or PHYSICALMEMORY field not present") 
             
-    memused_p=rss/phymem*100 #percent of mem used
+    memused_p=float(rss)/float(phymem)*100.00 #percent of mem used
     memused=rss/1024  #in MB
+    # print memused_p
     if memused_p>mem_critical_p:
         issue=True
         issues['Memory usage critical']=memused_p
