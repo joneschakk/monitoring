@@ -5,8 +5,8 @@ import json
 import sys
 import pprint
 
-from get_voltdb_memstat import mem_stat_module
-from voltdb_repl import replication_check
+from voltdb_mem_stat import mem_stat_module
+from voltdb_repl_stat import replication_check
 
 def write_json(issues):
     with open('issue.json','w') as fp:
